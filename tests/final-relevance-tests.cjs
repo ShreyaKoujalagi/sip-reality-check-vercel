@@ -1,0 +1,16 @@
+'use strict';
+const assert=require('node:assert/strict');
+const {relevantAIResult,makePrompt,guidedReflection}=require('../netlify/functions/reflect.cjs');
+const fs=require('node:fs');
+const input={intent:'To grow my money',concern:'I am confused about my choice of mutual funds',context:''};
+const result={facts:['You said you are confused about your mutual fund choices.'],assumptions:['You might be assuming that all mutual funds behave the same way.'],unknowns:['What are you comparing?'],takeaway:'Learn about fund differences.'};
+assert.equal(relevantAIResult(result,input),'invented_user_belief');
+assert.equal(relevantAIResult({...result,assumptions:['No specific assumption can be identified from your description.']},input),null);
+assert.match(makePrompt(input),/DO NOT invent a specific belief/);
+const safe=guidedReflection(input);assert.ok(safe.assumptions.every(x=>!/(?:you might be assuming|it is possible you believe)/i.test(x)));
+const app=fs.readFileSync(require('node:path').resolve(__dirname,'../app.js'),'utf8');
+const html=fs.readFileSync(require('node:path').resolve(__dirname,'../index.html'),'utf8');
+assert.match(app,/fundChoice:\{title:'How can I understand different mutual funds\?/);
+assert.match(app,/return 'fundChoice'/);
+assert.match(html,/<option value="fundChoice">Understanding different mutual funds<\/option>/);
+console.log('PASS 7 final relevance checks');

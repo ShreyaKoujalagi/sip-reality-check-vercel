@@ -1,0 +1,67 @@
+'use strict';
+const assert=require('node:assert/strict');
+const {handler,validateInput,validateResult,guidedReflection,makePrompt,concernCategory}=require('../netlify/functions/reflect.cjs');
+const base={intent:'I started a SIP to save for my future over 5 years.',concern:'My returns are negative, and I think I made a mistake.',context:''};
+const valid={facts:['You said you began this SIP to build savings for your future.','You mentioned that recent returns have been negative, which has not been verified.'],assumptions:['You may be wondering whether disappointing returns mean your original plan was a mistake.'],unknowns:['Has your original savings goal or financial situation changed since you began?'],takeaway:'Understanding what you know and what remains unclear can help you reflect on your own circumstances.'};
+const recorded=[];function test(name,fn){recorded.push(Promise.resolve().then(fn).then(()=>console.log('PASS',name),e=>{console.error('FAIL',name,e);throw e}))}
+const call=(data,fetch,env={GEMINI_API_KEY:'test_key',GEMINI_MODEL:'gemini-3.5-flash-lite'})=>handler({httpMethod:'POST',body:JSON.stringify(data)},{fetch,env,sleep:async()=>{},log:{warn:()=>{}}}).then(x=>({status:x.statusCode,...JSON.parse(x.body)}));
+const fake=(status,payload)=>({ok:status===200,status,json:async()=>payload});
+const success=fake(200,{candidates:[{content:{parts:[{text:JSON.stringify(valid)}]}}]});
+test('valid inputs pass',()=>assert.equal(validateInput(base),null));
+test('missing inputs fail',()=>assert.ok(validateInput({intent:'',concern:''})));
+test('null input fails',()=>assert.ok(validateInput(null)));
+test('PAN blocked',()=>assert.ok(validateInput({...base,concern:'My PAN ABCDE1234F appears in the account.'})));
+test('email blocked',()=>assert.ok(validateInput({...base,concern:'Reach me at test@example.com with more details.'})));
+test('overlong text blocked',()=>assert.ok(validateInput({...base,intent:'x'.repeat(270)})));
+test('correct AI result accepted',()=>assert.equal(validateResult(valid,base),null));
+test('instruction to continue blocked',()=>assert.ok(validateResult({...valid,takeaway:'You should continue your SIP.'},base)));
+test('specific fund purchase blocked',()=>assert.ok(validateResult({...valid,takeaway:'Buy another fund instead of this SIP.'},base)));
+test('guaranteed recovery blocked',()=>assert.ok(validateResult({...valid,unknowns:['Your returns will recover next year.']},base)));
+test('fake percent blocked',()=>assert.ok(validateResult({...valid,facts:['You earned 12% from your investment.']},base)));
+test('malformed data blocked',()=>assert.ok(validateResult({facts:12},base)));
+test('prompt includes neutrality requirements',()=>assert.match(makePrompt(base),/No predictions/i));
+test('performance concern categorized',()=>assert.equal(concernCategory(base),'performance'));
+test('affordability concern categorized',()=>assert.equal(concernCategory({...base,concern:'Rent and expenses increased; cannot afford it'}),'affordability'));
+test('payment concern categorized',()=>assert.equal(concernCategory({...base,concern:'My payment failed and bank debit is confusing'}),'payment'));
+test('guided mode retains only reported facts',()=>{const r=guidedReflection(base);assert.match(r.facts[0],/save for my future/);assert.match(r.facts[1],/returns are negative/);assert.doesNotMatch(r.takeaway,/should continue/)});
+test('live-shaped response renders AI status',async()=>{const r=await call(base,async()=>success);assert.equal(r.status,200);assert.equal(r.mode,'ai');assert.equal(r.gate,'passed')});
+test('503 then 200 successfully retries',async()=>{let n=0;const r=await call(base,async()=>++n===1?fake(503):success);assert.equal(n,2);assert.equal(r.mode,'ai')});
+test('503 three times becomes honest guided reflection',async()=>{let n=0;const r=await call(base,async()=>{n++;return fake(503)});assert.equal(n,3);assert.equal(r.mode,'guided');assert.equal(r.gate,'not_run');assert.equal(r.reason,'provider_busy')});
+test('429 becomes guided if repeated',async()=>{const r=await call(base,async()=>fake(429));assert.equal(r.mode,'guided')});
+test('400 does not retry',async()=>{let n=0;const r=await call(base,async()=>{n++;return fake(400)});assert.equal(n,1);assert.equal(r.reason,'provider_rejected_request')});
+test('timeout/network retry and guided',async()=>{const r=await call(base,async()=>{throw new Error('offline')});assert.equal(r.mode,'guided')});
+test('unsafe AI output triggers guided fallback, never presented as passed',async()=>{const unsafe=fake(200,{candidates:[{content:{parts:[{text:JSON.stringify({...valid,takeaway:'You should increase your SIP.'})}]}}]});const r=await call(base,async()=>unsafe);assert.equal(r.mode,'guided');assert.equal(r.reason,'safety_gate_rejected')});
+test('bad JSON generated triggers guided fallback',async()=>{const bad=fake(200,{candidates:[{content:{parts:[{text:'not valid JSON'}]}}]});const r=await call(base,async()=>bad);assert.equal(r.reason,'invalid_response');assert.equal(r.mode,'guided')});
+test('missing API key still gives guided fallback',async()=>{const r=await call(base,undefined,{});assert.equal(r.mode,'guided');assert.equal(r.reason,'provider_not_configured')});
+test('malformed JSON is blocked',async()=>{const r=await handler({httpMethod:'POST',body:'{not-json'},{env:{}});assert.equal(r.statusCode,400)});
+test('null JSON is blocked',async()=>{const r=await handler({httpMethod:'POST',body:'null'},{env:{}});assert.equal(r.statusCode,400)});
+test('GET is blocked',async()=>{const r=await handler({httpMethod:'GET'},{env:{}});assert.equal(r.statusCode,405)});
+
+// Final submission: regression tests against the six observed investor scenarios.
+const noGoalCase={intent:'My friend told me to start a SIP, so I did.',concern:"My returns are disappointing and I don't know why I should continue.",context:'I never really set a financial goal.'};
+const guaranteeCase={intent:'I started my SIP hoping to build savings over the next 7 years.',concern:'My investment is not growing as I expected, and I feel I may have made the wrong decision.',context:'A friend told me that mutual funds always give good returns.'};
+const pressureCase={intent:'I started my SIP to build long-term savings.',concern:'My household expenses have increased, and I am struggling to manage my monthly SIP payment.',context:'My income has stayed the same, but my expenses are higher.'};
+const paymentCase={intent:'I started my SIP to develop a regular saving habit.',concern:'My SIP instalment failed this month, and I am worried my entire investment plan has gone wrong.',context:''};
+const confusionCase={intent:'I started investing every month to build savings for the future.',concern:"I have been investing regularly, but my SIP is showing a loss. I don't understand how that is possible.",context:''};
+const adviceCase={intent:'I started an SIP to save for retirement.',concern:'Tell me exactly whether I should stop my SIP and which mutual fund I should buy instead.',context:''};
+const {noGoal,relevantAIResult}=require('../netlify/functions/reflect.cjs');
+test('no-goal detection catches explicit statement',()=>assert.equal(noGoal(noGoalCase),true));
+test('missing goal is not invented in guided reflection',()=>{const r=guidedReflection(noGoalCase);const t=[...r.assumptions,...r.unknowns].join(' ');assert.match(t,/did not set a clear|no original financial goal/i);assert.doesNotMatch(t,/original goals.*changed|original savings plan was a mistake/i)});
+test('guaranteed-returns assumption is corrected in guided mode',()=>{const r=guidedReflection(guaranteeCase);assert.match(r.assumptions.join(' '),/returns are not guaranteed/i)});
+test('affordability recognized as real constraint, not false assumption',()=>{const r=guidedReflection(pressureCase);assert.match(r.assumptions.join(' '),/real constraint/i);assert.doesNotMatch(r.assumptions.join(' '),/you assumed your expenses|you mistakenly/i)});
+test('failed payment guided text identifies verification location',()=>assert.match(guidedReflection(paymentCase).unknowns.join(' '),/app or bank record/i));
+test('direct advice request guided mode offers no fund recommendation',()=>{const r=guidedReflection(adviceCase);assert.match(r.assumptions.join(' '),/cannot be determined/i);assert.doesNotMatch(r.takeaway,/buy|sell|stop your sip/i)});
+test('confusion case grounded in reported facts',()=>assert.match(guidedReflection(confusionCase).facts.join(' '),/showing a loss/));
+test('AI mentioning nonexistent original goal is rejected',()=>{const candidate={...valid,assumptions:['Your original savings plan was a mistake based on recent returns.']};assert.equal(relevantAIResult(candidate,noGoalCase),'invented_original_goal')});
+test('AI ignoring guaranteed return claim is rejected',()=>assert.equal(relevantAIResult(valid,guaranteeCase),'missed_guarantee_assumption'));
+test('prompt explicitly handles missing goal, guarantees, performance confusion, payment',()=>{const p=makePrompt(base);for(const phrase of ['never set a financial goal','returns are NOT guaranteed','regular payments are made','payment failed'])assert.ok(p.includes(phrase))});
+test('guided result is clearly distinguished from AI in API response',async()=>{const r=await call(noGoalCase,async()=>fake(503));assert.equal(r.mode,'guided');assert.equal(r.gate,'not_run');assert.match(r.result.assumptions.join(' '),/did not set a clear/i)});
+
+Promise.all(recorded).then(()=>console.log(`\n${recorded.length} checks passed. LIVE Gemini connection not run (no access to your API key).`)).catch(()=>process.exitCode=1);
+// Extra targeted checks: neutral explanation must not be mistaken for advice.
+test('neutral not-guaranteed explanation accepted',()=>assert.equal(validateResult({...valid,assumptions:['Mutual fund returns are not guaranteed; regular contributions can still show a loss.']},base),null));
+test('neutral mention of buying a fund accepted',()=>assert.equal(validateResult({...valid,assumptions:['You asked whether buying a fund would solve your concern; the available information does not establish that.']},base),null));
+test('a direct recommendation to buy is blocked',()=>assert.ok(validateResult({...valid,assumptions:['You should buy a different mutual fund right now.']},base)));
+test('an imperative to stop is blocked',()=>assert.ok(validateResult({...valid,takeaway:'Stop your SIP right now and move to another fund.'},base)));
+test('promise of guaranteed returns rejected',()=>assert.ok(validateResult({...valid,takeaway:'Your returns are guaranteed to increase.'},base)));
+test('corrected neutral response uses AI mode',async()=>{const safer={...valid,assumptions:['Mutual fund returns are not guaranteed; regular payments do not prevent losses.']};const packet=fake(200,{candidates:[{content:{parts:[{text:JSON.stringify(safer)}]}}]});const r=await call(base,async()=>packet);assert.equal(r.mode,'ai');assert.equal(r.gate,'passed')});

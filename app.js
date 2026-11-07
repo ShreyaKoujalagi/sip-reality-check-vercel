@@ -1,7 +1,7 @@
 'use strict';
 const $=id=>document.getElementById(id);
 const form=$('reflectionForm'),empty=$('emptyState'),loading=$('loadingState'),output=$('output'),fallback=$('fallback');
-let lastResult=null,lastMode=null,lastNextStep='',lastLearning='',lastData=null,selectedLearningTopic='basics';
+let lastResult=null,lastMode=null,lastNextStep='',lastLearning='',lastData=null,selectedLearningTopic='basics',learningTopicManuallyChanged=false;
 const STORAGE_KEY='sipRealityCheck.savedStartingPoint.v1';
 let savedIntent='';
 function loadStartingPoint(){try{return localStorage.getItem(STORAGE_KEY)||''}catch{return ''}}
@@ -21,6 +21,7 @@ function nextStepFor(data){
  const noGoal=/\b(?:i am|i'm|im) not sure why i started\b/i.test(data.intent)||/(?:never|didn.t|did not|haven.t|have not|no|without|not really|don't|do not|not sure)\s+(?:(?:actually|really|even|yet|ever|originally)\s+)?(?:set|have|had|make|made|define|defined|choose|chosen|know|why)\s+(?:(?:a|an|any|my|specific|clear|financial|investment|saving|savings|real|proper|personal)\s+){0,4}(?:goal|plan|purpose|target|reason|objective|i started)/i.test(data.intent+' '+data.context);
  if(/(?:expense|rent|income|salary|emergency|afford|budget|cash flow|bills?|job loss)/i.test(text))return 'Review your current monthly income and essential expenses to understand what you can realistically afford. A genuine affordability change is not a misunderstanding.';
  if(/(?:failed|deduct|debit|payment|mandate|transaction|instalment|installment)/i.test(text))return 'Check the SIP transaction status and any failure reason in your investing app or bank record. A missed instalment does not, by itself, tell you how the investment performed.';
+ if(/\b(?:funds?|mutual funds?|schemes?)\b/i.test(text)&&/\b(?:select\w*|choos\w*|suitab\w*|right|wrong|types?|different|compar\w*|which|confus\w*)\b/i.test(text))return 'Check the official scheme information for the funds you hold, including investment objective, risk level and asset allocation. A qualified financial adviser, such as a SEBI-registered investment adviser, can help assess suitability for your personal circumstances.';
  if(/(?:which mutual fund|which fund|what fund should|should i (?:buy|sell|stop|continue|switch)|tell me exactly whether)/i.test(text))return 'A fund choice or SIP continuation decision needs verified information about your circumstances. Review your own facts and consider a qualified financial adviser for individualized guidance.';
  if(/(?:always|guarantee|assured|never lose)/i.test(text)&&/(?:mutual fund|returns?|profit|money|sip)/i.test(text))return 'Separate what you were told from what can be verified: mutual fund returns are not guaranteed. Review the actual performance details rather than relying on promises.';
  if(noGoal)return 'Start by deciding whether there is anything you want your investing to achieve. It is okay not to have an answer yet; there is no previous goal to compare against.';
@@ -33,6 +34,10 @@ function helpContentFor(data){
  const text=(data.concern+' '+data.context).toLowerCase();
  const starting=(data.intent+' '+data.context).toLowerCase();
  const noGoal=/not sure why i started|never (?:really )?(?:set|had|made) (?:a |any )?(?:financial )?goal|no (?:clear )?(?:financial )?goal|did not (?:set|have) (?:a |any )?goal|didn't (?:set|have) (?:a |any )?goal/.test(starting);
+ if(/\b(?:funds?|mutual funds?|schemes?)\b/.test(text)&&/\b(?:select\w*|choos\w*|suitab\w*|right|wrong|types?|different|compar\w*|which|confus\w*)\b/.test(text))return {
+  learn:'Different mutual funds have different objectives, investments and risks. This prototype cannot verify your personal situation or judge suitability from a fund name alone.',
+  explain:'To understand a mutual fund, look at what it invests in, its stated goal and its risk information. This tool cannot decide if it suits your circumstances.',
+  verify:'Compare the official scheme documents with your goals and timeframe, or seek individual guidance from a SEBI-registered adviser.'};
  if(/(?:which mutual fund|which fund|what fund should|should i (?:buy|sell|stop|continue|switch)|tell me exactly whether)/.test(text))return {
   learn:'A personal investment decision depends on facts this prototype cannot verify, including your needs, timeline and ability to take risk.',
   explain:'There is no single fund or SIP action that fits everyone. This tool can explain terms and questions, but cannot select an investment for you.',
@@ -72,14 +77,19 @@ const LEARNING_RESOURCES={
  basics:{title:'How does an SIP work?',bullets:['A SIP invests a chosen amount into a mutual fund at regular intervals.','The value of the mutual fund units changes; neither SIPs nor mutual funds guarantee a profit.','Review your risk tolerance, financial needs and the fund information before deciding anything.'],takeaway:'Understanding the mechanism is different from deciding whether it is right for you.',videoTopic:'What is SIP? / What is a Mutual Fund?',readUrl:'https://www.amfiindia.com/investor'}
 };
 function learningTopicFor(data){
- // Match the CURRENT concern first. An earlier reason to start the SIP should not
- // override what is troubling the investor today. This is a deterministic hint,
- // and users can always correct it using the topic selector.
- const t=((data?.concern||'')+' '+(data?.context||'')).toLowerCase(),intent=(data?.intent||'').toLowerCase();
- if(/(?:(?:choos|select|pick|picked|chose|chosen|right|suitable|best|wrong|which|different|types?|kind|category|scheme|schemes|options?|compar|confus|unsure|uncertain|doubt).{0,48}(?:mutual funds?|funds?|schemes?)|(?:mutual funds?|funds?|schemes?).{0,48}(?:choos|select|pick|picked|chose|chosen|right|suitable|best|wrong|which|different|types?|kind|category|options?|compar|confus|unsure|uncertain|doubt))/.test(t))return 'fundChoice';
- if(/failed|unsuccessful|rejected|bounced|payment|debit|mandate|transaction|instalment|installment|deduct|autopay|auto.pay/.test(t))return 'payment';
- if(/expense|rent|income|salary|emergency|afford|budget|cash.flow|bills?|job loss|lost (?:my |the )?job|money is tight|cannot pay|can't pay|unable to pay|not enough money|financial stress/.test(t))return 'budget';
- if(/negative|loss|losing|lost money|return|market|profit|down|performance|performing|growing|growth|not growing|risk|volatile|volatility|nav|value (?:fell|dropped|decreased)|declining|underperform|not making money|no gains|disappoint|fluctuat/.test(t))return 'returns';
+ // Interpret the current problem, not the original investment goal.
+ // An ordinary SIP "payment" is not evidence of a FAILED transaction.
+ const t=((data?.concern||'')+' '+(data?.context||'')).toLowerCase();
+ const intent=(data?.intent||'').toLowerCase();
+ const fund=/\b(?:mutual funds?|funds?|schemes?)\b/.test(t);
+ const choice=/\b(?:choos\w*|select\w*|pick\w*|picked|chose|chosen|right|suitab\w*|appropriat\w*|best|wrong|which|different|types?|kinds?|category|options?|compar\w*|confus\w*|unsure|uncertain|doubt\w*|fit|risks?)\b/.test(t);
+ // Fund choice and fund suitability are different from having no investment goal.
+ if(fund && choice)return 'fundChoice';
+ const failedPayment=/(?:fail\w*|unsuccessful|reject\w*|bounc\w*|missed|not deduct\w*|didn.t deduct|not debited|wasn.t debited|debit failed|mandate fail\w*|autopay fail\w*|transaction fail\w*|payment error|sip error)/.test(t) && /(?:sip|instalment|installment|payment|debit|mandate|bank|transaction|autopay)/.test(t);
+ if(failedPayment)return 'payment';
+ // Budget difficulty can involve words like "payment" or "instalment"; it is NOT a payment failure.
+ if(/expense|rent|income|salary|emergency|afford|budget|cash[ -]?flow|bills?|job loss|lost (?:my |the )?job|money is tight|cannot pay|can't pay|unable to pay|not enough money|financial stress|struggling to (?:pay|manage)|family commitments|essential needs/.test(t))return 'budget';
+ if(/negative|loss|losing|lost money|returns?|market|profit|down|performance|performing|growing|growth|not growing|risk|volatile|volatility|nav|value (?:fell|dropped|decreased)|declining|underperform|not making money|no gains|disappoint|fluctuat/.test(t))return 'returns';
  if(/(?:why|what).*(?:start|invest)|goal|purpose|not sure why i started|no goal|without a goal|don't know why/.test(t))return 'goal';
  if(/not sure why i started|no goal|without a goal|don't know why/.test(intent))return 'goal';
  return 'basics';
@@ -87,16 +97,20 @@ function learningTopicFor(data){
 function currentLearningResource(){return LEARNING_RESOURCES[selectedLearningTopic]||LEARNING_RESOURCES.basics;}
 function updateLearningTopic(){
  selectedLearningTopic=$('learnTopicSelect').value;
+ learningTopicManuallyChanged=true;
  const r=currentLearningResource();
  $('learnTopic').textContent=r.title;
  if(!$('learnStarter').hidden)$('learnStarter').textContent=r.bullets[0];
  setHidden($('learnAnswer'),true);
  document.querySelectorAll('[data-learn]').forEach(b=>b.setAttribute('aria-pressed','false'));
 }
-function resetLearning(response){
+function resetLearning(response,{preserveTopic=false}={}){
  setHidden($('learnAnswer'),true);setHidden($('learnBulletBox'),true);setHidden($('learnLink'),true);
  document.querySelectorAll('[data-learn]').forEach(b=>b.setAttribute('aria-pressed','false'));
- selectedLearningTopic=learningTopicFor(lastData);
+ if(!preserveTopic || !learningTopicManuallyChanged){
+  selectedLearningTopic=learningTopicFor(lastData);
+  learningTopicManuallyChanged=false;
+ }
  $('learnTopicSelect').value=selectedLearningTopic;
  const resource=currentLearningResource();
  $('learnTopic').textContent=resource.title;
@@ -219,7 +233,7 @@ document.querySelectorAll('[data-clarity]').forEach(button=>button.addEventListe
  document.querySelectorAll('[data-clarity]').forEach(b=>b.setAttribute('aria-pressed',String(b===button)));
  const response=button.dataset.clarity;
  $('clarityMessage').textContent=response==='yes'?'Glad this helped you understand the concern. The decision remains yours.':response==='partly'?'You already have some clarity. Let’s focus on the question that remains.':'That’s okay. Start with one simple explanation; there is no need to decide today.';
- setHidden($('extraHelp'),response==='yes');resetLearning(response);setHidden($('helpAnswer'),true);setHidden($('supportChoices'),true);document.querySelectorAll('[data-help]').forEach(b=>b.setAttribute('aria-pressed','false'));
+ setHidden($('extraHelp'),response==='yes');resetLearning(response,{preserveTopic:true});setHidden($('helpAnswer'),true);setHidden($('supportChoices'),true);document.querySelectorAll('[data-help]').forEach(b=>b.setAttribute('aria-pressed','false'));
 }));
 document.querySelectorAll('[data-help]').forEach(button=>button.addEventListener('click',()=>displayHelp(button.dataset.help)));
 

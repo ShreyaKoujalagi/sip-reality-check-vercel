@@ -4,7 +4,7 @@ for(const id of ['learnCorner','learnTopic','learnAnswer','learnBullets','learnT
 for(const option of ['read','video','later'])assert(html.includes(`data-learn="${option}"`),option);
 for(const topic of ['returns','budget','payment','goal','basics'])assert(js.includes(`${topic}:{title:`),topic);
 assert(js.includes('function learningTopicFor(data)'));
-assert(js.includes('resetLearning(response);'));
+assert(js.includes('resetLearning(response,{preserveTopic:true});')); // preserve manual correction when switching clarity
 for(const id of ['helpHeading','learnHeading','learnIntro','learnStarter'])assert(html.includes(`id="${id}"`),id);
 assert(js.includes("response==='partly'"));
 assert(js.includes("resource.bullets[0]"));
